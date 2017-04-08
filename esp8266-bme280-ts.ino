@@ -1,82 +1,74 @@
-#define SDA_PIN 0
-#define SCL_PIN 2
-
 #include <Wire.h>
-#include <BME280.h>
+#include <BME280I2C.h>
 #include <ESP8266WiFi.h>
+#include "config.h"
 
 ADC_MODE(ADC_VCC);
 
-BME280 bme;
+//// BME
+BME280I2C bme;
 bool metricUnit = true;
 uint8_t pressureUnit = 1; // unit: B000 = Pa, B001 = hPa, B010 = Hg, B011 = atm, B100 = bar, B101 = torr, B110 = N/m^2, B111 = psi
+unsigned long nextRead = BME_DISABLE + 2000; // wait for sensor to be stabilized
+bool isRead = false;
 
-const int bmeRetryInterval = 2*1000;
-uint32_t bmeErrorCount = 0;
+//// Wifi connection
+unsigned long nextWifiReport = 0;
 
+//// Wifi client
 WiFiClient client;
-const char* wifiSsid = "WIFISSID";
-const char* wifiPass = "WIFIPASS";
-const char* tsServer = "api.thingspeak.com";
-const char* tsApiKey = "THINGSPEAKKEY";
-const long tsInterval = 300 * 1000;
-unsigned long nextTsUpdate = 0;
-
-const long wifiInterval = 500;
-unsigned long lastWifi = 0;
+String postStr = "";
 bool isConnected = false;
 
-const long timeout = 30 * 1000;
-
-void doDeepSleep() {
-  ESP.rtcUserMemoryWrite(0, &bmeErrorCount, sizeof(bmeErrorCount));
-  Serial.print("DeepSleep(us):");
-  long sleepTime = (tsInterval - millis()) * 1000;
-  if (sleepTime < 1){
-    sleepTime = 1;
-  }
-  Serial.println(sleepTime);
-  ESP.deepSleep(sleepTime);
-}
+//// RTC User Data
+struct {
+  uint32_t bmeErrorCount;
+  uint32_t timeoutCount;
+  uint32_t crc32;
+} rtcData;
 
 void setup() {
-  ESP.rtcUserMemoryRead(0, &bmeErrorCount, sizeof(bmeErrorCount));
+  pinMode(BME_PWR_PIN, OUTPUT);
+  digitalWrite(BME_PWR_PIN, HIGH);
   Serial.begin(9600);
+  Serial.println("Waking up.");
+  delay(BME_DISABLE);
+  
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
   Wire.begin(SDA_PIN, SCL_PIN);
-  while(!bme.begin()){
-    Serial.println("Could not find BME280 sensor!");
-    delay(1000);
+  bme.begin();
+  
+  ESP.rtcUserMemoryRead(0, (uint32_t*) &rtcData, sizeof(rtcData));
+  if (calcCRC32(((uint8_t*) &rtcData), sizeof(rtcData)-4) != rtcData.crc32){
+    Serial.println("RTC data has wrong CRC, discarded.");
+    rtcData.bmeErrorCount = 0;
+    rtcData.timeoutCount = 0;
+  } else {
+    Serial.println("RTC data:");
+    Serial.print("BME Error Count:");
+    Serial.println(rtcData.bmeErrorCount);
+    Serial.print("Awake Timeout Count:");
+    Serial.println(rtcData.timeoutCount);
   }
-  WiFi.begin(wifiSsid, wifiPass);
-  Serial.println("Start");
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    if (lastWifi + wifiInterval < millis()){
-      lastWifi = millis();
-      Serial.print("Connecting WiFi:");
-      Serial.println(wifiSsid);
-    }
-    if (timeout < millis()){
-      doDeepSleep();
-    }
-    return;
+  if (AWAKE_TIMEOUT < millis()){
+    Serial.println("Work is not finished, but it's time to sleep.");
+    rtcData.timeoutCount++;
+    goDeepSleep();
   }
-
-  if (nextTsUpdate < millis()){
-    client.stop();
-    isConnected = false;
+  
+  if (!isRead && nextRead < millis()){
     Serial.println("Reading...");
 
     /// BME280
     float temp(NAN), humi(NAN), pres(NAN);
-    bme.ReadData(pres, temp, humi, metricUnit, pressureUnit);
+    bme.read(pres, temp, humi, metricUnit, pressureUnit);
     if (isnan(temp) || isnan(pres) || isnan(humi)) {
-      Serial.print("BME280 Read Error, counted: ");
-      Serial.println(bmeErrorCount);
-      bmeErrorCount++;
-      nextTsUpdate = millis() + bmeRetryInterval;
+      Serial.println("BME280 Read Error");
+      rtcData.bmeErrorCount++;
+      nextRead = millis() + BME_INTERVAL;
       return;
     }
 
@@ -109,39 +101,64 @@ void loop() {
     Serial.print(vcc);
     Serial.println("mV");
 
+    Serial.print("BME Error Count:");
+    Serial.println(rtcData.bmeErrorCount);
+    Serial.print("Awake Timeout Count:");
+    Serial.println(rtcData.timeoutCount);
+
     /// TS Data
-    String postStr = "api_key=";
-    postStr += tsApiKey;
+    postStr = "api_key=";
+    postStr += TS_KEY;
     postStr +="&field1=";
     postStr += String(temp);
     postStr +="&field2=";
     postStr += String(humi);
     postStr +="&field3=";
     postStr += String(pres);
-    postStr +="&field5=";
+    postStr +="&field4=";
     postStr += String(dp);
-    postStr +="&field6=";
+    postStr +="&field5=";
     postStr += String(hi);
+    postStr +="&field6=";
+    postStr += String(rtcData.bmeErrorCount);
     postStr +="&field7=";
-    postStr += String(bmeErrorCount);
+    postStr += String(rtcData.timeoutCount);
     postStr +="&field8=";
     postStr += String(vcc);
-    
-    bmeErrorCount = 0;
-    nextTsUpdate = millis() + tsInterval;
-    
+
     Serial.println(postStr);
-      
+    isRead = true;
+    digitalWrite(BME_PWR_PIN, LOW); // Power off
+  }
+
+  if (WiFi.status() != WL_CONNECTED){
+    if (nextWifiReport < millis()){
+      nextWifiReport = millis() + WIFI_PRINT_INTERVAL;
+      Serial.print("Connecting WiFi:");
+      Serial.println(WIFI_SSID);
+    }
+    return;
+  }
+
+  if (!isRead){
+    return;
+  }
+
+  //// We can continue below,
+  //// only if both sensor reading and wifi connection are completed.
+
+  if (!isConnected){
     Serial.print("Connecting to ");
-    Serial.println(tsServer);
-    if (client.connect(tsServer,80)) {
-      isConnected = true;
+    Serial.print(TS_HOST);
+    Serial.print(":");
+    Serial.println(TS_PORT);
+    if (client.connect(TS_HOST,TS_PORT)){
       
       Serial.print("Sending data...");
       
       client.println("POST /update HTTP/1.1");
       client.print("Host: ");
-      client.println(tsServer);
+      client.println(TS_HOST);
       client.println("Connection: close");
       client.println("Content-Type: application/x-www-form-urlencoded");
       client.print("Content-Length: ");
@@ -149,30 +166,62 @@ void loop() {
       client.println();
       client.print(postStr);
       
+      isConnected = true;
       Serial.println("Done");
     } else {
       Serial.println("Connection error");
+      return;
+    }
+  }
+  
+  if (client.connected()){
+    while (client.available()){
+      Serial.print(client.read());
     }
     return;
   }
   
-  if (isConnected){
-    if (client.connected()){
-      while (client.available()){
-        Serial.print(client.read());
+  client.stop();
+  Serial.println();
+  Serial.println("Disconnected.");
+
+  // Reset
+  rtcData.bmeErrorCount = 0;
+  rtcData.timeoutCount = 0;
+
+  Serial.println("Work is done. Going back to sleep.");
+  goDeepSleep();
+}
+
+void goDeepSleep(){
+  rtcData.crc32 = calcCRC32(((uint8_t*) &rtcData), sizeof(rtcData)-4);
+  ESP.rtcUserMemoryWrite(0, (uint32_t*) &rtcData, sizeof(rtcData));
+
+  Serial.print("Deep Sleep (us):");
+  long sleepTime = (TS_INTERVAL - millis()) * 1000;
+  if (sleepTime < 1){
+    sleepTime = 1;
+  }
+  Serial.println(sleepTime);
+  ESP.deepSleep(sleepTime);
+}
+
+uint32_t calcCRC32(const uint8_t *data, size_t length){
+  uint32_t crc = 0xffffffff;
+  while (length--){
+    uint8_t c = *data++;
+    for (uint32_t i=0x80; i > 0; i>>=1){
+      bool bit = crc & 0x80000000;
+      if (c & i){
+        bit = !bit;
       }
-    } else {
-      client.stop();
-      Serial.println();
-      Serial.println("Disconnected.");
-      isConnected = false;
+      crc <<= 1;
+      if (bit){
+        crc ^= 0x04c11db7;
+      }
     }
-    return;
   }
-  
-  if (timeout < millis()){
-    doDeepSleep();
-  }
+  return crc;
 }
 
 float computeDewPoint(float temp, float humi, bool metricUnit) {
