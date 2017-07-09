@@ -4,15 +4,19 @@
 #include "config.h"
 
 ADC_MODE(ADC_VCC);
+long vcc = 0;
 
 //// BME
 BME280I2C bme;
+float temp(NAN), humi(NAN), pres(NAN);
+float dp(NAN), hi(NAN);
 bool metricUnit = true;
 uint8_t pressureUnit = 1; // unit: B000 = Pa, B001 = hPa, B010 = Hg, B011 = atm, B100 = bar, B101 = torr, B110 = N/m^2, B111 = psi
-unsigned long nextRead = BME_DISABLE + 2000; // wait for sensor to be stabilized
+unsigned long nextRead = 1000;
 bool isRead = false;
 
 //// Wifi connection
+int32_t rssi = 0;
 unsigned long nextWifiReport = 0;
 
 //// Wifi client
@@ -22,34 +26,44 @@ bool isConnected = false;
 
 //// RTC User Data
 struct {
-  uint32_t bmeErrorCount;
   uint32_t timeoutCount;
   uint32_t crc32;
 } rtcData;
 
 void setup() {
-  pinMode(BME_PWR_PIN, OUTPUT);
-  digitalWrite(BME_PWR_PIN, HIGH);
   Serial.begin(9600);
   Serial.println("Waking up.");
-  delay(BME_DISABLE);
-  
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Wire.begin(SDA_PIN, SCL_PIN);
-  bme.begin();
-  
+
+  delay(1000);
+
+  /// Input Voltage
+  vcc = ESP.getVcc();
+  Serial.print("Vcc:");
+  Serial.print(vcc);
+  Serial.println("mV");
+
+  /// Read RTC Memory
   ESP.rtcUserMemoryRead(0, (uint32_t*) &rtcData, sizeof(rtcData));
   if (calcCRC32(((uint8_t*) &rtcData), sizeof(rtcData)-4) != rtcData.crc32){
     Serial.println("RTC data has wrong CRC, discarded.");
-    rtcData.bmeErrorCount = 0;
     rtcData.timeoutCount = 0;
   } else {
     Serial.println("RTC data:");
-    Serial.print("BME Error Count:");
-    Serial.println(rtcData.bmeErrorCount);
     Serial.print("Awake Timeout Count:");
     Serial.println(rtcData.timeoutCount);
   }
+
+  if (vcc <= BATT_CRT){
+    Serial.print("Battery critical, Go sleep!");
+    goDeepSleep();
+  }
+
+  /// Init WiFi
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  /// Init BME
+  Wire.begin(SDA_PIN, SCL_PIN);
+  bme.begin();
 }
 
 void loop() {
@@ -58,77 +72,36 @@ void loop() {
     rtcData.timeoutCount++;
     goDeepSleep();
   }
-  
+
   if (!isRead && nextRead < millis()){
     Serial.println("Reading...");
 
     /// BME280
-    float temp(NAN), humi(NAN), pres(NAN);
     bme.read(pres, temp, humi, metricUnit, pressureUnit);
-    if (isnan(temp) || isnan(pres) || isnan(humi)) {
-      Serial.println("BME280 Read Error");
-      rtcData.bmeErrorCount++;
-      nextRead = millis() + BME_INTERVAL;
-      return;
-    }
-
     Serial.print("Temp:");
     Serial.print(temp);
     Serial.println((metricUnit ? "C" :"F"));
-    
     Serial.print("Humi:");
     Serial.print(humi);
     Serial.println("%RH");
-    
     Serial.print("Pres:");
     Serial.print(pres);
     Serial.println("hPa");
 
     // Calculate HeatIndex and DewPoint
-    float dp = computeDewPoint(temp, humi, metricUnit);
-    float hi = computeHeatIndex(temp, humi, metricUnit);
-    Serial.print("DewPoint :");
+    dp = computeDewPoint(temp, humi, metricUnit);
+    hi = computeHeatIndex(temp, humi, metricUnit);
+    Serial.print("DewPoint:");
     Serial.print(dp);
     Serial.println((metricUnit ? "C" :"F"));
     Serial.print("HeatIndex:");
     Serial.print(hi);
     Serial.println((metricUnit ? "C" :"F"));
-    
-    /// Input Voltage
-    long vcc = ESP.getVcc();
-    
-    Serial.print("Vcc :");
-    Serial.print(vcc);
-    Serial.println("mV");
 
-    Serial.print("BME Error Count:");
-    Serial.println(rtcData.bmeErrorCount);
     Serial.print("Awake Timeout Count:");
     Serial.println(rtcData.timeoutCount);
 
-    /// TS Data
-    postStr = "api_key=";
-    postStr += TS_KEY;
-    postStr +="&field1=";
-    postStr += String(temp);
-    postStr +="&field2=";
-    postStr += String(humi);
-    postStr +="&field3=";
-    postStr += String(pres);
-    postStr +="&field4=";
-    postStr += String(dp);
-    postStr +="&field5=";
-    postStr += String(hi);
-    postStr +="&field6=";
-    postStr += String(rtcData.bmeErrorCount);
-    postStr +="&field7=";
-    postStr += String(rtcData.timeoutCount);
-    postStr +="&field8=";
-    postStr += String(vcc);
-
-    Serial.println(postStr);
     isRead = true;
-    digitalWrite(BME_PWR_PIN, LOW); // Power off
   }
 
   if (WiFi.status() != WL_CONNECTED){
@@ -140,6 +113,14 @@ void loop() {
     return;
   }
 
+  if (!rssi){
+    /// WiFi RSSI
+    rssi = WiFi.RSSI();
+    Serial.print("Rssi:");
+    Serial.print(rssi);
+    Serial.println("dBm");
+  }
+
   if (!isRead){
     return;
   }
@@ -148,14 +129,52 @@ void loop() {
   //// only if both sensor reading and wifi connection are completed.
 
   if (!isConnected){
+    /// TS Data
+    postStr = "api_key=";
+    postStr += TS_KEY;
+    if (!isnan(temp)){
+      postStr +="&field1=";
+      postStr += String(temp);
+    }
+    if (!isnan(humi)){
+      postStr +="&field2=";
+      postStr += String(humi);
+    }
+    if (!isnan(pres)){
+      postStr +="&field3=";
+      postStr += String(pres);
+    }
+    if (!isnan(dp)){
+      postStr +="&field4=";
+      postStr += String(dp);
+    }
+    if (!isnan(hi)){
+      postStr +="&field5=";
+      postStr += String(hi);
+    }
+    if (!isnan(rtcData.timeoutCount)){
+      postStr +="&field6=";
+      postStr += String(rtcData.timeoutCount);
+    }
+    if (!isnan(rssi)){
+      postStr +="&field7=";
+      postStr += String(rssi);
+    }
+    if (!isnan(vcc)){
+      postStr +="&field8=";
+      postStr += String(vcc);
+    }
+    Serial.print("Data:");
+    Serial.println(postStr);
+
     Serial.print("Connecting to ");
     Serial.print(TS_HOST);
     Serial.print(":");
     Serial.println(TS_PORT);
     if (client.connect(TS_HOST,TS_PORT)){
-      
+
       Serial.print("Sending data...");
-      
+
       client.println("POST /update HTTP/1.1");
       client.print("Host: ");
       client.println(TS_HOST);
@@ -165,7 +184,7 @@ void loop() {
       client.println(postStr.length());
       client.println();
       client.print(postStr);
-      
+
       isConnected = true;
       Serial.println("Done");
     } else {
@@ -173,20 +192,19 @@ void loop() {
       return;
     }
   }
-  
+
   if (client.connected()){
     while (client.available()){
       Serial.print(client.read());
     }
     return;
   }
-  
+
   client.stop();
   Serial.println();
   Serial.println("Disconnected.");
 
   // Reset
-  rtcData.bmeErrorCount = 0;
   rtcData.timeoutCount = 0;
 
   Serial.println("Work is done. Going back to sleep.");
@@ -198,7 +216,10 @@ void goDeepSleep(){
   ESP.rtcUserMemoryWrite(0, (uint32_t*) &rtcData, sizeof(rtcData));
 
   Serial.print("Deep Sleep (us):");
-  long sleepTime = (TS_INTERVAL - millis()) * 1000;
+  long sleepTime = (INTERVAL_NRM - millis()) * 1000;
+  if (vcc <= BATT_LOW){
+    sleepTime = (INTERVAL_LOW - millis()) * 1000;
+  }
   if (sleepTime < 1){
     sleepTime = 1;
   }
@@ -229,27 +250,27 @@ float computeDewPoint(float temp, float humi, bool metricUnit) {
   // http://andrew.rsmas.miami.edu;
 
   float dp = NAN;
-  
+
   if (!metricUnit){
     temp = convertFtoC(temp);
   }
-  
+
   dp = 243.04 * (log(humi/100.0) + ((17.625 * temp)/(243.04 + temp)))
       /(17.625 - log(humi/100.0) - ((17.625 * temp)/(243.04 + temp)));
- 
+
   return metricUnit ? dp : convertCtoF(dp) ;
 }
 
 float computeHeatIndex(float temp, float humi, bool metricUnit) {
   // Using both Rothfusz and Steadman's equations
   // http://www.wpc.ncep.noaa.gov/html/heatindex_equation.shtml
-  
+
   float hi;
 
   if (metricUnit){
     temp = convertCtoF(temp);
   }
-  
+
   hi = 0.5 * (temp + 61.0 + ((temp - 68.0) * 1.2) + (humi * 0.094));
 
   if (hi > 79) {
