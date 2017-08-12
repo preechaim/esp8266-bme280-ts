@@ -152,18 +152,13 @@ void loop() {
       postStr +="&field5=";
       postStr += String(hi);
     }
-    if (!isnan(rtcData.timeoutCount)){
-      postStr +="&field6=";
-      postStr += String(rtcData.timeoutCount);
-    }
-    if (!isnan(rssi)){
-      postStr +="&field7=";
-      postStr += String(rssi);
-    }
-    if (!isnan(vcc)){
-      postStr +="&field8=";
-      postStr += String(vcc);
-    }
+    postStr +="&field6=";
+    postStr += String(rtcData.timeoutCount);
+    postStr +="&field7=";
+    postStr += String(rssi);
+    postStr +="&field8=";
+    postStr += String(vcc);
+
     Serial.print("Data:");
     Serial.println(postStr);
 
