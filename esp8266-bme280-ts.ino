@@ -67,13 +67,13 @@ void setup() {
 }
 
 void loop() {
-  if (AWAKE_TIMEOUT < millis()){
+  if (millis() - AWAKE_TIMEOUT < 0){
     Serial.println("Work is not finished, but it's time to sleep.");
     rtcData.timeoutCount++;
     goDeepSleep();
   }
 
-  if (!isRead && nextRead < millis()){
+  if (!isRead && millis() - nextRead < 0){
     Serial.println("Reading...");
 
     /// BME280
@@ -105,7 +105,7 @@ void loop() {
   }
 
   if (WiFi.status() != WL_CONNECTED){
-    if (nextWifiReport < millis()){
+    if (millis() - nextWifiReport > 0){
       nextWifiReport = millis() + WIFI_PRINT_INTERVAL;
       Serial.print("Connecting WiFi:");
       Serial.println(WIFI_SSID);
