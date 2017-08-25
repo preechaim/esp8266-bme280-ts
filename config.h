@@ -12,7 +12,6 @@
 
 #define SDA_PIN 0
 #define SCL_PIN 2
-#define BME_INTERVAL 1000
 
 // Setup for 1W mini solar panel + 2xAA NiMH rechargeable batteries
 #define BATT_LOW 2300 // low battery voltage -> use INTERVAL_LOW

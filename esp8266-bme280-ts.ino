@@ -12,7 +12,6 @@ float temp(NAN), humi(NAN), pres(NAN);
 float dp(NAN), hi(NAN);
 bool metricUnit = true;
 uint8_t pressureUnit = 1; // unit: B000 = Pa, B001 = hPa, B010 = Hg, B011 = atm, B100 = bar, B101 = torr, B110 = N/m^2, B111 = psi
-unsigned long nextRead = 1000;
 bool isRead = false;
 
 //// Wifi connection
@@ -64,6 +63,7 @@ void setup() {
   /// Init BME
   Wire.begin(SDA_PIN, SCL_PIN);
   bme.begin();
+  bme.setMode(0x01);
 }
 
 void loop() {
@@ -73,7 +73,7 @@ void loop() {
     goDeepSleep();
   }
 
-  if (!isRead && millis() > nextRead){
+  if (!isRead){
     Serial.println("Reading...");
 
     /// BME280
